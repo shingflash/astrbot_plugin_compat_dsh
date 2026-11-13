@@ -1,10 +1,12 @@
 /**
- * cordis-mini —— 冒充 DSH 的 Cordis 宿主，只实现 dsh 插件实际会用到的那几个服务。
+ * cordis-mini - a stand-in for the dsh Cordis host, implementing only the
+ * services dsh plugins actually touch.
  *
- * 设计原则：
- *   1. 不追 Cordis 全部语义，只追「插件作者真的会调」的那部分。
- *   2. 服务缺失时不崩，给空实现并记一条 warn —— 让插件降级跑，而不是起不来。
- *   3. 所有注册动作都往 host 上报，宿主（AstrBot）才能把它们变成自己的东西。
+ * Design rules:
+ *   1. Do not chase full Cordis semantics, only what plugin authors really call.
+ *   2. Missing services never crash: return a no-op and log a warning so the
+ *      plugin degrades instead of failing to start.
+ *   3. Every registration is reported to the host so AstrBot can adopt it.
  */
 import { inspect } from 'node:util'
 
@@ -25,7 +27,7 @@ export function createLogger(sink, scope) {
 
   const fn = make('info')
   for (const lv of LEVELS) fn[lv] = make(lv)
-  // cordis 里 ctx.logger 也能当函数调：ctx.logger('name') 返回子 logger
+  // in cordis, ctx.logger is also callable: ctx.logger('name') returns a child logger
   fn.scope = (name) => createLogger(sink, String(name))
   return fn
 }
@@ -38,24 +40,24 @@ export function createHost({ onTool, onContext, onRoute, logger }) {
   const disposed = []
 
   const ctx = {
-    // ---- 生命期 ----
+    // ---- lifecycle ----
     effect(fn) {
       try {
         const d = fn()
         if (typeof d === 'function') effects.push(d)
       } catch (e) {
-        logger({ level: 'warn', scope: 'effect', text: 'effect 执行失败：' + e.message })
+        logger({ level: 'warn', scope: 'effect', text: 'effect failed: ' + e.message })
       }
       return () => {}
     },
     on() { return () => {} },
     emit() {},
 
-    // ---- 工具 ----
+    // ---- tools ----
     tools: {
       register(tool) {
-        if (!tool || !tool.name) throw new Error('tool 缺 name')
-        if (typeof tool.execute !== 'function') throw new Error(`tool ${tool.name} 缺 execute`)
+        if (!tool || !tool.name) throw new Error('tool has no name')
+        if (typeof tool.execute !== 'function') throw new Error(`tool ${tool.name} has no execute`)
         tools.set(tool.name, tool)
         onTool?.(describeTool(tool))
         return () => tools.delete(tool.name)
@@ -64,7 +66,7 @@ export function createHost({ onTool, onContext, onRoute, logger }) {
       list() { return [...tools.values()].map(describeTool) },
     },
 
-    // ---- 系统提示注入 ----
+    // ---- system prompt hooks ----
     systemPrompt: {
       context(item) {
         if (item && typeof item === 'object') {
@@ -75,7 +77,7 @@ export function createHost({ onTool, onContext, onRoute, logger }) {
       },
     },
 
-    // ---- Web 路由（宿主若有 HTTP 再挂，没有就只记着）----
+    // ---- web routes (mounted only if the host has HTTP; otherwise just recorded) ----
     webServer: {
       register(r) {
         routes.push(r)
@@ -84,7 +86,7 @@ export function createHost({ onTool, onContext, onRoute, logger }) {
       },
     },
 
-    // ---- 杂项：插件偶尔会摸，摸不到会崩，所以都垫上 ----
+    // ---- misc: plugins poke these now and then; all stubbed so they do not crash ----
     logger: createLogger(logger, 'plugin'),
     console: { log: (...a) => logger({ level: 'info', scope: 'plugin', text: a.map(stringify).join(' ') }) },
     storage: {
@@ -95,13 +97,13 @@ export function createHost({ onTool, onContext, onRoute, logger }) {
     },
   }
 
-  // ctx.plugin()：dsh 插件有时会内联加载子插件
+  // ctx.plugin(): dsh plugins sometimes load sub-plugins inline
   ctx.plugin = (mod) => {
     try {
       if (typeof mod === 'function') mod(ctx)
       else if (mod && typeof mod.apply === 'function') mod.apply(ctx)
     } catch (e) {
-      logger({ level: 'error', scope: 'plugin', text: '子插件加载失败：' + e.message })
+      logger({ level: 'error', scope: 'plugin', text: 'sub-plugin load failed: ' + e.message })
     }
   }
 
@@ -118,7 +120,7 @@ export function createHost({ onTool, onContext, onRoute, logger }) {
           const v = typeof it.text === 'function' ? await it.text(arg) : it.text
           if (v) out.push(String(v))
         } catch (e) {
-          logger({ level: 'warn', scope: 'systemPrompt', text: `${it.name} 求值失败：${e.message}` })
+          logger({ level: 'warn', scope: 'systemPrompt', text: `${it.name} evaluation failed: ${e.message}` })
         }
       }
       return out.join('\n\n')
@@ -132,7 +134,7 @@ export function createHost({ onTool, onContext, onRoute, logger }) {
 }
 
 export function describeTool(tool) {
-  // 把 dsh 的「简写 properties」翻译成 JSON Schema
+  // turn dsh shorthand properties into JSON Schema
   let params = tool.parameters || {}
   if (!params.type) {
     params = { type: 'object', properties: params, additionalProperties: false }

@@ -1,15 +1,17 @@
-"""DSH 插件兼容桥 —— 让 AstrBot 直接吃 DSH / Cordis 插件，不用装 DSH。
+"""dsh plugin compatibility layer - let AstrBot consume dsh / Cordis plugins
+without installing dsh itself.
 
-原理（强行兼容，不是协商）：
-  * 每个 DSH 插件起一个 node 子进程，跑 host/boot.mjs；
-  * boot.mjs 用 ESM loader 劫持 `cordis` / `@deepseek-ai/dsh-tools` 这些 import，
-    塞进我们自己的假货（host/shim/），所以插件以为自己跑在 harness 里；
-  * 插件调 ctx.tools.register / ctx.systemPrompt.context 时，宿主全记下来；
-  * 这边把工具注册成 AstrBot 的 FunctionTool，把提示注入接进 on_llm_request。
+How it works (shim, not negotiation):
+  * every dsh plugin gets one node child process running host/boot.mjs;
+  * boot.mjs hijacks ESM imports of `cordis` / `@deepseek-ai/dsh-tools` to local
+    shims, so the plugin believes it runs inside the harness;
+  * ctx.tools.register / ctx.systemPrompt.context calls are captured by the host;
+  * this plugin re-registers those tools as AstrBot FunctionTools and merges the
+    prompt fragments into on_llm_request.
 
-对主人：
-  /dshcompat            看桥状态（几个插件、几个工具）
-  /dshcompat reload     重新拉起
+Commands:
+  /dshcompat            show bridge status
+  /dshcompat reload     restart every plugin
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ BRIDGE_DIR = Path(__file__).parent
 HOST_DIR = BRIDGE_DIR / "host"
 BOOT_JS = HOST_DIR / "boot.mjs"
 
-# DSH 桌面版自带的 node 运行时（有就用，用户不用另装 node）
+# Node runtime shipped with the dsh desktop client.
 DSH_NODE_CANDIDATES = [
     Path.home() / ".dsh" / "dsh-runtimes" / "dsh-primary-runtime" / "dependencies" / "node" / "bin" / "node.exe",
     Path.home() / ".dsh" / "dsh-runtimes" / "dsh-primary-runtime" / "dependencies" / "node" / "bin" / "node",
@@ -47,7 +49,7 @@ def _find_node(configured: str = "") -> str | None:
 
 
 class DshProcess:
-    """一个 DSH 插件 = 一个 node 子进程 + 一条 stdio JSON-lines 通道。"""
+    """One dsh plugin == one node child process + one stdio JSON-lines channel."""
 
     def __init__(self, plugin_dir: str, node: str, name: str = ""):
         self.dir = str(Path(plugin_dir).resolve())
@@ -64,7 +66,7 @@ class DshProcess:
 
     async def start(self, timeout: float = 45.0) -> None:
         if not BOOT_JS.exists():
-            raise FileNotFoundError(f"桥的宿主脚本没了：{BOOT_JS}")
+            raise FileNotFoundError(f"host script missing: {BOOT_JS}")
         self.proc = await asyncio.create_subprocess_exec(
             self.node, str(BOOT_JS), "--plugin", self.dir,
             stdin=asyncio.subprocess.PIPE,
@@ -75,7 +77,7 @@ class DshProcess:
         self._reader = asyncio.create_task(self._read_loop())
         first = await asyncio.wait_for(self.proc.stdout.readline(), timeout=timeout)
         if not first:
-            raise RuntimeError(f"{self.name}: 子进程没返回 ready")
+            raise RuntimeError(f"{self.name}: child process returned no ready frame")
         msg = json.loads(first.decode("utf-8", "replace"))
         if msg.get("event") == "fatal":
             raise RuntimeError(f"{self.name}: {msg.get('error', '')[:400]}")
@@ -103,11 +105,11 @@ class DshProcess:
                         fut.set_result(msg.get("result"))
             elif msg.get("event") == "fatal":
                 self.last_error = str(msg.get("error", ""))[:500]
-                logger.error(f"[compat_dsh] {self.name} 致命错误：{self.last_error}")
+                logger.error(f"[compat_dsh] {self.name} fatal: {self.last_error}")
 
     async def call(self, method: str, params: dict | None = None, timeout: float = 60.0):
         if not self.proc or self.proc.returncode is not None:
-            raise RuntimeError(f"{self.name}: 进程不在")
+            raise RuntimeError(f"{self.name}: process is not running")
         self._seq += 1
         rid = self._seq
         fut = asyncio.get_running_loop().create_future()
@@ -139,8 +141,8 @@ class DshProcess:
 @register(
     "astrbot_plugin_compat_dsh",
     "shingflash",
-    "DSH/Cordis 插件兼容桥：不用装 DSH，把 dsh 插件直接拉进 AstrBot",
-    "1.0.0",
+    "dsh/Cordis plugin compatibility layer: load dsh plugins into AstrBot without dsh",
+    "1.0.2",
 )
 class DshBridgePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -150,18 +152,18 @@ class DshBridgePlugin(Star):
         self.node = ""
         self._booted = False
 
-    # ---------- 生命周期 ----------
+    # ---------- lifecycle ----------
     async def initialize(self):
         await self._boot()
 
     async def _boot(self):
         dirs = self._plugin_dirs()
         if not dirs:
-            logger.info("[compat_dsh] 没配插件目录，桥空转")
+            logger.info("[compat_dsh] no plugin directories configured; bridge idle")
             return
         self.node = _find_node(self.config.get("node_path", "")) or ""
         if not self.node:
-            logger.error("[compat_dsh] 找不到 node：装一个或填 node_path，或装过 DSH 桌面版")
+            logger.error("[compat_dsh] node not found: install node, set node_path, or install the dsh desktop client")
             return
         logger.info(f"[compat_dsh] node = {self.node}")
         for d in dirs:
@@ -176,7 +178,7 @@ class DshBridgePlugin(Star):
             if p and Path(p).exists():
                 out.append(p)
             elif p:
-                logger.warning(f"[compat_dsh] 目录不存在，跳过：{p}")
+                logger.warning(f"[compat_dsh] directory missing, skipped: {p}")
         return out
 
     async def _add_one(self, d: str) -> None:
@@ -186,11 +188,11 @@ class DshBridgePlugin(Star):
             self.procs[p.name] = p
             self._register_tools(p)
             logger.info(
-                f"[compat_dsh] {p.name} 已上车：{len(p.tools)} 工具 / "
-                f"{len(p.prompts)} 注入口 / {len(p.routes)} 路由"
+                f"[compat_dsh] {p.name} loaded: {len(p.tools)} tools / "
+                f"{len(p.prompts)} prompt hooks / {len(p.routes)} routes"
             )
         except Exception as e:
-            logger.error(f"[compat_dsh] {Path(d).name} 起不来：{e}")
+            logger.error(f"[compat_dsh] {Path(d).name} failed to start: {e}")
             await p.stop()
 
     def _register_tools(self, p: DshProcess) -> None:
@@ -211,7 +213,7 @@ class DshBridgePlugin(Star):
             try:
                 self.context.add_llm_tools(*made)
             except Exception as e:
-                logger.error(f"[compat_dsh] 注册工具失败：{e}")
+                logger.error(f"[compat_dsh] failed to register tools: {e}")
 
     def _make_handler(self, p: DshProcess, tool_name: str):
         async def handler(**kwargs):
@@ -219,7 +221,7 @@ class DshBridgePlugin(Star):
                 res = await p.call("tools.call", {"name": tool_name, "args": kwargs}, timeout=120)
                 return str(res)
             except Exception as e:
-                return f"[{p.name}/{tool_name} 调用失败] {e}"
+                return f"[{p.name}/{tool_name} call failed] {e}"
 
         return handler
 
@@ -228,7 +230,7 @@ class DshBridgePlugin(Star):
             await p.stop()
         self.procs.clear()
 
-    # ---------- 提示注入 ----------
+    # ---------- prompt injection ----------
     @filter.on_llm_request()
     async def inject_context(self, event: AstrMessageEvent, req: ProviderRequest):
         if not self.config.get("inject_prompt", True) or not self.procs:
@@ -249,25 +251,25 @@ class DshBridgePlugin(Star):
                 if out:
                     chunks.append(str(out))
             except Exception as e:
-                logger.debug(f"[compat_dsh] {p.name} 注入失败：{e}")
+                logger.debug(f"[compat_dsh] {p.name} injection failed: {e}")
         if chunks:
             req.system_prompt = (req.system_prompt or "") + "\n\n" + "\n\n".join(chunks)
 
-    # ---------- 指令 ----------
-    @filter.command("dshbridge")
+    # ---------- commands ----------
+    @filter.command("dshcompat")
     async def cmd_status(self, event: AstrMessageEvent):
-        """dshcompat [reload] —— 看桥状态 / 重新拉起"""
-        arg = (event.message_str or "").split(maxsplit=1)
-        if len(arg) > 1 and arg[1].strip() in ("reload", "重载", "重启"):
+        """dshcompat [reload] - show bridge status or restart every plugin"""
+        parts = (event.message_str or "").split(maxsplit=1)
+        if len(parts) > 1 and parts[1].strip().lower() in ("reload", "restart"):
             for p in list(self.procs.values()):
                 await p.stop()
             self.procs.clear()
             await self._boot()
-            return event.plain_result(f"重载完了，现在 {len(self.procs)} 个插件在车上")
+            return event.plain_result(f"reloaded; {len(self.procs)} plugin(s) loaded")
         if not self.procs:
-            return event.plain_result("桥上没车。配置里填 dsh 插件目录，或装过 DSH 桌面版就去 ~/.dsh/plugins 找。")
-        lines = [f"dsh 兼容桥 · node {self.node or '未找到'}"]
+            return event.plain_result("No plugins loaded. Set plugin_dirs, or install the dsh desktop client and point at ~/.dsh/plugins.")
+        lines = [f"dsh compatibility bridge - node {self.node or 'not found'}"]
         for p in self.procs.values():
-            tools = "、".join(t["name"] for t in p.tools) or "无"
-            lines.append(f"· {p.name}：工具 {len(p.tools)}（{tools}），注入 {len(p.prompts)}")
+            tools = ", ".join(t["name"] for t in p.tools) or "none"
+            lines.append(f"- {p.name}: {len(p.tools)} tools ({tools}), {len(p.prompts)} prompt hooks")
         return event.plain_result("\n".join(lines))

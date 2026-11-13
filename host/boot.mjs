@@ -1,14 +1,14 @@
 /**
- * boot.mjs —— 把一个 DSH / Cordis 插件强行拉起来，挂到我们自己的宿主上。
+ * boot.mjs - start a dsh / Cordis plugin on top of our own host.
  *
- * 用法：
- *   node boot.mjs --plugin <插件目录> [--probe]
- *   node boot.mjs --plugin <dir> --rpc        # 进入 stdio JSON-lines RPC 模式
+ * Usage:
+ *   node boot.mjs --plugin <plugin dir> [--probe]
+ *   node boot.mjs --plugin <dir> --rpc        # stdio JSON-lines RPC mode
  *
- * 协议：一行一个 JSON。
- *   请求：{"id":1,"method":"tools.call","params":{"name":"x","args":{}}}
- *   响应：{"id":1,"result":...} 或 {"id":1,"error":"..."}
- *   主动推送：{"event":"ready","plugin":"memewiki","tools":[{"name":...}]}
+ * Protocol: one JSON per line.
+ *   request : {"id":1,"method":"tools.call","params":{"name":"x","args":{}}}
+ *   response: {"id":1,"result":...} or {"id":1,"error":"..."}
+ *   event   : {"event":"ready","plugin":"memewiki","tools":[{"name":...}]}
  */
 import { register } from 'node:module'
 import { pathToFileURL, fileURLToPath } from 'node:url'
@@ -17,7 +17,7 @@ import { join, dirname, resolve, isAbsolute } from 'node:path'
 import { createInterface } from 'node:readline'
 import { createHost } from './cordis-mini.mjs'
 
-// stdout 只留协议帧，插件里的 console.log 一律改道 stderr
+// stdout carries protocol frames only; plugin console.log is redirected to stderr
 const writeFrame = (obj) => process.stdout.write(JSON.stringify(obj) + '\n')
 console.log = (...a) => process.stderr.write(a.map(String).join(' ') + '\n')
 console.info = console.log
@@ -25,7 +25,7 @@ console.debug = console.log
 console.warn = console.log
 console.error = (...a) => process.stderr.write(a.map(String).join(' ') + '\n')
 
-// ---- 参数 ----
+// ---- arguments ----
 const argv = process.argv.slice(2)
 const arg = (k) => {
   const i = argv.indexOf(k)
@@ -35,15 +35,15 @@ const pluginDir = arg('--plugin')
 const probe = argv.includes('--probe')
 const debug = argv.includes('--debug')
 if (!pluginDir) {
-  console.error('缺 --plugin <插件目录>')
+  console.error('missing --plugin <plugin dir>')
   process.exit(2)
 }
 if (!existsSync(pluginDir) || !statSync(pluginDir).isDirectory()) {
-  console.error('插件目录不存在：' + pluginDir)
+  console.error('plugin directory not found: ' + pluginDir)
   process.exit(2)
 }
 
-// ---- 装 shim：让插件的 import 'cordis' / '@deepseek-ai/dsh-tools' 落到我们自己的假货上 ----
+// ---- install shim: route imports of 'cordis' / '@deepseek-ai/dsh-tools' to our fakes ----
 register('./shim-loader.mjs', import.meta.url)
 
 const sink = (rec) => {
@@ -51,7 +51,7 @@ const sink = (rec) => {
   process.stderr.write(`[${rec.level}] ${rec.scope ? rec.scope + ': ' : ''}${rec.text}\n`)
 }
 
-// ---- 找入口 ----
+// ---- locate entry ----
 function findEntry(dir) {
   const pkgPath = join(dir, 'package.json')
   let entry
@@ -69,7 +69,7 @@ function findEntry(dir) {
     entry = 'index.js'
   }
   const full = isAbsolute(entry) ? entry : resolve(dir, entry)
-  if (!existsSync(full)) throw new Error('入口不存在：' + full)
+  if (!existsSync(full)) throw new Error('entry not found: ' + full)
   return full
 }
 
@@ -80,17 +80,17 @@ function load() {
   const entry = findEntry(pluginDir)
   host = createHost({
     logger: sink,
-    onTool: (t) => debug && sink({ level: 'debug', scope: 'host', text: 'tool 注册 ' + t.name }),
-    onContext: (c) => debug && sink({ level: 'debug', scope: 'host', text: 'prompt 注入 ' + c.name }),
+    onTool: (t) => debug && sink({ level: 'debug', scope: 'host', text: 'tool registered ' + t.name }),
+    onContext: (c) => debug && sink({ level: 'debug', scope: 'host', text: 'prompt hook ' + c.name }),
     onRoute: (r) => debug && sink({ level: 'debug', scope: 'host', text: `route ${r.kind} ${r.path}` }),
   })
   return import(pathToFileURL(entry).href).then((mod) => {
     pluginName = mod.name || mod.default?.name || 'unknown'
     const apply = mod.apply || mod.default?.apply || (typeof mod.default === 'function' ? mod.default : null)
     if (typeof apply !== 'function') {
-      throw new Error('这个模块没有 apply(ctx)，不像 dsh 插件')
+      throw new Error('module has no apply(ctx); not a dsh plugin')
     }
-    // inject 声明的服务，我们全都有（假装有），不看顺序
+    // pretend every injected service exists; order is irrelevant here
     const injected = mod.inject || mod.default?.inject || []
     if (debug && injected.length) sink({ level: 'debug', scope: 'host', text: 'inject: ' + injected.join(',') })
     apply(host.ctx)
@@ -99,9 +99,10 @@ function load() {
 }
 
 /**
- * 把宿主（AstrBot）的对话消息翻译成 dsh 那种 session 事件流。
- * dsh 插件普遍从 ctx.agent.session.snapshotEvents() 里挖最后一条 user/message，
- * 所以这里必须伪造出同形状的东西，否则注入口一律返回空。
+ * Translate a host (AstrBot) message list into the dsh session event stream.
+ * dsh plugins usually dig the last user/message out of
+ * ctx.agent.session.snapshotEvents(), so we fake that shape; otherwise prompt
+ * hooks return nothing.
  */
 function makePromptContext(params) {
   if (params?.arg && typeof params.arg === 'object') return params.arg
@@ -130,9 +131,9 @@ function makePromptContext(params) {
 
 async function callTool(name, args) {
   const tool = host.ctx.tools.get(name)
-  if (!tool) throw new Error('没有这个工具：' + name)
+  if (!tool) throw new Error('no such tool: ' + name)
   const value = await tool.execute(args ?? {})
-  // dsh 的 output.render 负责把值转成消息块，有就用它
+  // dsh output.render turns the value into message blocks; use it when present
   const render = tool.output?.render
   if (typeof render === 'function') {
     const blocks = await render(args ?? {}, value)
@@ -154,7 +155,7 @@ async function rpcLoop() {
     try {
       req = JSON.parse(raw)
     } catch {
-      writeFrame({ error: '不是合法 JSON' })
+      writeFrame({ error: 'invalid JSON' })
       continue
     }
     const { id, method, params } = req
@@ -184,7 +185,7 @@ async function rpcLoop() {
           host.disposeAll()
           process.exit(0)
         default:
-          throw new Error('未知方法：' + method)
+          throw new Error('unknown method: ' + method)
       }
       writeFrame({ id, result })
     } catch (e) {
@@ -193,7 +194,7 @@ async function rpcLoop() {
   }
 }
 
-// ---- 跑 ----
+// ---- run ----
 load()
   .then(async () => {
     if (probe) {

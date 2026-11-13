@@ -1,6 +1,7 @@
 /**
- * 假 dsh-tools：把插件常用的那几个导出做成能用的。
- * 真货在 @deepseek-ai/dsh-tools 里，我们只负责让插件不炸且行为正确。
+ * Fake dsh-tools: make the exports plugins commonly use actually work.
+ * The real ones live in @deepseek-ai/dsh-tools; here we only need plugins not
+ * to crash and to behave correctly.
  */
 function schemaOf(parameters) {
   if (!parameters) return { type: 'object', properties: {}, additionalProperties: false }

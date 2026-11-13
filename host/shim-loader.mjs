@@ -1,6 +1,7 @@
 /**
- * shim-loader —— 强行兼容的核心：在 import 解析阶段把这些包名劫走。
- * 插件以为自己 import 了 cordis / dsh-tools，实际上拿到的是我们的假货。
+ * shim-loader - the core of the shim route: hijack these package names during
+ * import resolution. Plugins think they import cordis / dsh-tools, but they get
+ * our fakes.
  */
 const SHIM = new URL('./shim/', import.meta.url)
 

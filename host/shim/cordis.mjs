@@ -1,6 +1,7 @@
 /**
- * 假 cordis：只导那些插件会从 'cordis' 里 import 的名字。
- * 真 Cordis 是完整的依赖注入容器，我们这套里 ctx 由 host 直接构造，这里只负责「能被 import」。
+ * Fake cordis: exports only the names plugins import from 'cordis'.
+ * Real Cordis is a full DI container; here ctx is built by the host directly,
+ * so this module only needs to be importable.
  */
 export class Context {
   constructor(scope = {}) {
