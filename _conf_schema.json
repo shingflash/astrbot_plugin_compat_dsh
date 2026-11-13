@@ -1,0 +1,22 @@
+{
+  "plugin_dirs": {
+    "type": "string",
+    "default": "",
+    "description": "DSH 插件目录，多个用分号/逗号/换行分隔。例如 %USERPROFILE%\\.dsh\\plugins\\dsh-memewiki"
+  },
+  "node_path": {
+    "type": "string",
+    "default": "",
+    "description": "node 可执行文件路径。留空自动找 DSH 桌面版自带运行时，再找不到用系统 node"
+  },
+  "inject_prompt": {
+    "type": "bool",
+    "default": true,
+    "description": "把插件的系统提示注入口（ctx.systemPrompt.context）接进每轮对话"
+  },
+  "mcp_mode": {
+    "type": "bool",
+    "default": false,
+    "description": "同时以 MCP stdio server 暴露工具（给 DSH 或别的 MCP 客户端调用）"
+  }
+}

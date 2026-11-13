@@ -1,0 +1,11 @@
+name: astrbot_plugin_compat_dsh
+display_name: dsh 插件兼容层（AstrBot 端）
+desc: 让 AstrBot 直接吃 dsh / Cordis 插件，不用装 dsh 本体
+version: 1.0.0
+author: shingflash
+repo: https://github.com/shingflash/astrbot_plugin_compat_dsh
+astrbot_version: ">=4.27.1,<5"
+tags:
+  - 兼容层
+  - dsh
+  - 插件
