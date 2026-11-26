@@ -84,7 +84,7 @@ function load() {
     onContext: (c) => debug && sink({ level: 'debug', scope: 'host', text: 'prompt hook ' + c.name }),
     onRoute: (r) => debug && sink({ level: 'debug', scope: 'host', text: `route ${r.kind} ${r.path}` }),
   })
-  return import(pathToFileURL(entry).href).then((mod) => {
+  return import(pathToFileURL(entry).href).then(async (mod) => {
     pluginName = mod.name || mod.default?.name || 'unknown'
     const apply = mod.apply || mod.default?.apply || (typeof mod.default === 'function' ? mod.default : null)
     if (typeof apply !== 'function') {
@@ -93,7 +93,9 @@ function load() {
     // pretend every injected service exists; order is irrelevant here
     const injected = mod.inject || mod.default?.inject || []
     if (debug && injected.length) sink({ level: 'debug', scope: 'host', text: 'inject: ' + injected.join(',') })
-    apply(host.ctx)
+    // apply() is allowed to be async; await it or the ready frame goes out
+    // before the plugin registers its tools.
+    await apply(host.ctx)
     return { pluginName, injected }
   })
 }
