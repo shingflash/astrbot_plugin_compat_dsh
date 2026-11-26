@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import sys
+from collections import deque
 from pathlib import Path
 
 from astrbot.api import logger
@@ -62,7 +63,10 @@ class DshProcess:
         self._seq = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._reader: asyncio.Task | None = None
+        self._stderr_reader: asyncio.Task | None = None
+        self._ready: asyncio.Future | None = None
         self.last_error = ""
+        self.stderr_tail: deque[str] = deque(maxlen=30)
 
     async def start(self, timeout: float = 45.0) -> None:
         if not BOOT_JS.exists():
@@ -74,16 +78,48 @@ class DshProcess:
             stderr=asyncio.subprocess.PIPE,
             cwd=str(HOST_DIR),
         )
+        # A single owner for stdout: the read loop. It hands the ready frame back
+        # through this future. Reading the same StreamReader from two coroutines
+        # raises "readuntil() called while another coroutine is already waiting".
+        self._ready = asyncio.get_running_loop().create_future()
         self._reader = asyncio.create_task(self._read_loop())
-        first = await asyncio.wait_for(self.proc.stdout.readline(), timeout=timeout)
-        if not first:
+        self._stderr_reader = asyncio.create_task(self._drain_stderr())
+        try:
+            msg = await asyncio.wait_for(self._ready, timeout=timeout)
+        except asyncio.TimeoutError:
+            detail = " | ".join(self.stderr_tail)
+            await self.stop()
+            raise RuntimeError(f"{self.name}: no ready frame in {timeout}s {detail}".strip())
+        except Exception:
+            await self.stop()
+            raise
+        if not msg:
             raise RuntimeError(f"{self.name}: child process returned no ready frame")
-        msg = json.loads(first.decode("utf-8", "replace"))
-        if msg.get("event") == "fatal":
-            raise RuntimeError(f"{self.name}: {msg.get('error', '')[:400]}")
         self.name = msg.get("plugin") or self.name
         self.tools = msg.get("tools") or []
         self.prompts = msg.get("prompts") or []
+
+    async def _drain_stderr(self) -> None:
+        """Keep reading stderr: boot.mjs sends every plugin log there, and a full
+        64 KiB pipe would block the child forever."""
+        assert self.proc and self.proc.stderr
+        while True:
+            line = await self.proc.stderr.readline()
+            if not line:
+                break
+            self.stderr_tail.append(line.decode("utf-8", "replace").rstrip())
+
+    def _resolve_ready(self, msg: dict) -> None:
+        if self._ready is not None and not self._ready.done():
+            self._ready.set_result(msg)
+
+    def _fail_ready(self, err: Exception) -> None:
+        if self._ready is not None and not self._ready.done():
+            self._ready.set_exception(err)
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.set_exception(err)
+        self._pending.clear()
 
     async def _read_loop(self) -> None:
         assert self.proc and self.proc.stdout
@@ -95,6 +131,15 @@ class DshProcess:
                 msg = json.loads(line.decode("utf-8", "replace"))
             except Exception:
                 continue
+            event = msg.get("event")
+            if event == "ready":
+                self._resolve_ready(msg)
+                continue
+            if event == "fatal":
+                self.last_error = str(msg.get("error", ""))[:500]
+                logger.error(f"[compat_dsh] {self.name} fatal: {self.last_error}")
+                self._fail_ready(RuntimeError(f"{self.name}: {self.last_error[:400]}"))
+                continue
             rid = msg.get("id")
             if rid is not None and rid in self._pending:
                 fut = self._pending.pop(rid)
@@ -103,9 +148,7 @@ class DshProcess:
                         fut.set_exception(RuntimeError(str(msg["error"])))
                     else:
                         fut.set_result(msg.get("result"))
-            elif msg.get("event") == "fatal":
-                self.last_error = str(msg.get("error", ""))[:500]
-                logger.error(f"[compat_dsh] {self.name} fatal: {self.last_error}")
+        self._fail_ready(RuntimeError(f"{self.name}: child process exited"))
 
     async def call(self, method: str, params: dict | None = None, timeout: float = 60.0):
         if not self.proc or self.proc.returncode is not None:
@@ -123,19 +166,28 @@ class DshProcess:
             self._pending.pop(rid, None)
 
     async def stop(self) -> None:
+        proc = self.proc
         try:
-            if self.proc and self.proc.returncode is None:
+            if proc and proc.returncode is None:
                 await asyncio.wait_for(self.call("shutdown", timeout=3), timeout=4)
         except Exception:
             pass
-        if self._reader:
-            self._reader.cancel()
-        if self.proc and self.proc.returncode is None:
+        for task in (self._reader, self._stderr_reader):
+            if task:
+                task.cancel()
+        if proc and proc.returncode is None:
             try:
-                self.proc.kill()
+                proc.kill()
+            except Exception:
+                pass
+        if proc:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
             except Exception:
                 pass
         self.proc = None
+        self._reader = None
+        self._stderr_reader = None
 
 
 @register(
