@@ -251,16 +251,27 @@ class DshBridgePlugin(Star):
         from astrbot.core.agent.tool import FunctionTool
 
         made = []
+        seen: set[str] = set()
         for t in p.tools:
-            name = f"{p.name.replace('-', '_')}__{t['name']}"
-            made.append(
-                FunctionTool(
-                    name=name[:64],
-                    description=(t.get("description") or "")[:1000],
-                    parameters=t.get("parameters") or {"type": "object", "properties": {}},
-                    handler=self._make_handler(p, t["name"]),
+            name = f"{p.name.replace('-', '_')}__{t['name']}"[:64]
+            # AstrBot validates `parameters` against the JSON-Schema meta-schema
+            # when the FunctionTool is built. One malformed tool must not cost
+            # the whole plugin (the exception used to escape to _add_one).
+            if name in seen:
+                logger.warning(f"[compat_dsh] {p.name}: duplicate tool name skipped: {name}")
+                continue
+            seen.add(name)
+            try:
+                made.append(
+                    FunctionTool(
+                        name=name,
+                        description=(t.get("description") or "")[:1000],
+                        parameters=t.get("parameters") or {"type": "object", "properties": {}},
+                        handler=self._make_handler(p, t["name"]),
+                    )
                 )
-            )
+            except Exception as e:
+                logger.warning(f"[compat_dsh] {p.name}/{t['name']} skipped: {e}")
         if made:
             try:
                 self.context.add_llm_tools(*made)
